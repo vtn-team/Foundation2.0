@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "Bash(find:*)",
+      "Bash(cat:*)",
+      "Bash(echo:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git reset:*)",
+      "Bash(git config:*)",
+      "Bash(touch:*)",
+      "Bash(git checkout:*)",
+      "Bash(grep:*)"
+    ],
+    "deny": []
+  },
+  "env": {
+  }
+}
