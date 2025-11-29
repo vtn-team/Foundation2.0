@@ -1,0 +1,183 @@
+# PRコンパイルチェックワークフロー
+#
+# PRの作成・更新時にUnityプロジェクトのコンパイルエラーをチェック
+#
+# 必要なGitHub Secrets:
+#   - UNITY_EDITOR_PATH: Unityエディタのパス（必須）
+
+name: PR Compile Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  compile-check:
+    # Self-Hosted Runnerで実行
+    runs-on: [self-hosted, PRCheck, Windows]
+
+    steps:
+    # リポジトリをチェックアウト
+    - name: リポジトリのチェックアウト
+      uses: actions/checkout@v4
+      with:
+        clean: false
+
+    # Unity環境の検証
+    - name: Unity環境の検証
+      id: validate-unity
+      shell: cmd
+      run: |
+        @echo off
+        REM GitHub SecretsからUnityパスを取得
+        set UNITY_PATH=${{ secrets.UNITY_EDITOR_PATH }}
+
+        REM Unityパスが設定されているか確認
+        if "%UNITY_PATH%"=="" (
+          echo ❌ UNITY_EDITOR_PATH シークレットが設定されていません
+          echo GitHub リポジトリの Settings ^> Secrets and variables ^> Actions で設定してください
+          exit /b 1
+        )
+
+        REM Unityが指定パスに存在するか確認
+        if not exist "%UNITY_PATH%" (
+          echo ❌ Unityが見つかりません: %UNITY_PATH%
+          echo UNITY_EDITOR_PATH シークレットを正しいパスに更新してください
+          exit /b 1
+        )
+
+        echo ✅ Unity検証成功: %UNITY_PATH%
+        echo UNITY_PATH=%UNITY_PATH% >> %GITHUB_OUTPUT%
+
+    # Unityプロジェクトのコンパイル
+    - name: Unityプロジェクトのコンパイル
+      id: compile
+      shell: cmd
+      run: |
+        @echo off
+        set PROJECT_ROOT=${{ github.workspace }}
+        set UNITY_PATH=${{ steps.validate-unity.outputs.UNITY_PATH }}
+        set COMPILE_LOG=%PROJECT_ROOT%\compile.log
+        cd unity
+
+        echo コンパイルチェック開始...
+
+        REM BuildScriptを使用してコンパイルチェック実行
+        "%UNITY_PATH%" -batchmode -quit -projectPath . -executeMethod BuildScript.CompilePlayerScripts -logFile "%COMPILE_LOG%"
+        set COMPILE_EXIT_CODE=%ERRORLEVEL%
+        echo compile_exit_code=%COMPILE_EXIT_CODE% >> %GITHUB_OUTPUT%
+
+        REM 終了コードで判定（0なら成功、それ以外は失敗）
+        if %COMPILE_EXIT_CODE% neq 0 (
+          echo has_errors=true >> %GITHUB_OUTPUT%
+          echo ❌ コンパイル失敗 (終了コード: %COMPILE_EXIT_CODE%)
+          exit /b %COMPILE_EXIT_CODE%
+        )
+
+        echo has_errors=false >> %GITHUB_OUTPUT%
+        echo ✅ コンパイル成功
+
+    # エラーログの抽出
+    - name: エラーログの抽出
+      if: failure()
+      id: error-log
+      shell: cmd
+      run: |
+        @echo off
+        setlocal enabledelayedexpansion
+        set PROJECT_ROOT=${{ github.workspace }}
+        set COMPILE_LOG=%PROJECT_ROOT%\compile.log
+        if exist "%COMPILE_LOG%" (
+          echo ERROR_LOG^<^<EOF >> %GITHUB_OUTPUT%
+          REM TestCompile固有のエラーメッセージと一般的なコンパイルエラーを抽出
+          findstr /n /c:"=== TestCompile: Compilation failed" /c:"CompilerError" /c:"Error" /c:"Exception" /c:"Assets\" "%COMPILE_LOG%" >> %GITHUB_OUTPUT% 2>nul || echo ログにエラーが見つかりませんでした >> %GITHUB_OUTPUT%
+          echo EOF >> %GITHUB_OUTPUT%
+        ) else (
+          echo ERROR_LOG=コンパイルログが見つかりません >> %GITHUB_OUTPUT%
+        )
+        exit /b 0
+
+    # エラーサマリーの作成
+    - name: エラーサマリーの作成
+      if: failure()
+      id: summary
+      shell: cmd
+      run: |
+        @echo off
+        setlocal enabledelayedexpansion
+        set PROJECT_ROOT=${{ github.workspace }}
+        set REPORT_FILE=%PROJECT_ROOT%\compile-report.md
+
+        (
+        echo SUMMARY^<^<EOF
+        echo ## ❌ スクリプトコンパイルエラーが検出されました
+        echo.
+        echo ### 詳細なレポート:
+        if exist "%REPORT_FILE%" (
+          type "%REPORT_FILE%" 2>nul
+        ) else (
+          echo コンパイルレポートが生成されませんでした。
+          echo.
+          echo ### エラー内容:
+          echo ```
+          echo ${{ steps.error-log.outputs.ERROR_LOG }}
+          echo ```
+        )
+        echo.
+        echo ### 対応方法:
+        echo 1. エラーログを確認してください
+        echo 2. コンパイルエラーを修正してください
+        echo 3. 修正後、再度プッシュしてください
+        echo.
+        echo ビルドログの詳細は[Actions]^(https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}^)を確認してください。
+        echo EOF
+        ) >> %GITHUB_OUTPUT%
+        exit /b 0
+
+    # PRにコメント（エラー時のみ）
+    - name: PRにエラーコメント
+      if: failure()
+      shell: cmd
+      run: |
+        @echo off
+        set PROJECT_ROOT=${{ github.workspace }}
+        set TEMP_FILE=%PROJECT_ROOT%\temp_error_summary.md
+
+        REM サマリーを一時ファイルに書き込み
+        echo ${{ steps.summary.outputs.SUMMARY }} > "%TEMP_FILE%"
+
+        REM GitHub CLIでPRにコメント
+        gh pr comment ${{ github.event.number }} --body-file "%TEMP_FILE%"
+
+        REM 一時ファイルをクリーンアップ
+        if exist "%TEMP_FILE%" del "%TEMP_FILE%"
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # コンパイルレポートの表示
+    - name: コンパイルレポートの表示
+      if: always()
+      id: report
+      shell: cmd
+      run: |
+        @echo off
+        setlocal enabledelayedexpansion
+        set PROJECT_ROOT=${{ github.workspace }}
+        set REPORT_FILE=%PROJECT_ROOT%\compile-report.md
+
+        echo === コンパイルレポート表示 ===
+        if exist "%REPORT_FILE%" (
+          echo レポートファイル: %REPORT_FILE%
+          echo.
+          echo COMPILE_REPORT^<^<EOF >> %GITHUB_OUTPUT%
+          type "%REPORT_FILE%" >> %GITHUB_OUTPUT% 2>nul || echo レポートファイル読み込みエラー >> %GITHUB_OUTPUT%
+          echo EOF >> %GITHUB_OUTPUT%
+
+          echo === レポート内容 ===
+          type "%REPORT_FILE%"
+          echo === レポート終了 ===
+        ) else (
+          echo レポートファイルが見つかりません: %REPORT_FILE%
+          echo COMPILE_REPORT=コンパイルレポートが生成されませんでした >> %GITHUB_OUTPUT%
+        )
+        exit /b 0

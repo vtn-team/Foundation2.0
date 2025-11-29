@@ -1,0 +1,208 @@
+# 日次実装レビューワークフロー
+#
+# 毎日JST 4:00に実行し、前回実行以降の変更をサマライズしてSlackに投稿する
+#
+# 必要なGitHub Secrets:
+#   - SLACK_BOT_TOKEN: Slack Bot Token（xoxb-から始まる、オプション）
+#   - SLACK_CHANNEL_ID: Slack投稿先チャンネルID（オプション）
+
+name: Daily Implementation Review
+
+on:
+  schedule:
+    # JST 4:00 (UTC 19:00 前日) - 毎日の定期実行
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+    # 手動実行用
+
+jobs:
+  daily-review:
+    # Self-Hosted Runnerで実行
+    runs-on: [self-hosted, unity, Windows]
+
+    steps:
+    # リポジトリをチェックアウト
+    - name: リポジトリのチェックアウト
+      uses: actions/checkout@v4
+      with:
+        clean: false
+
+    # Git設定
+    - name: Git設定
+      shell: cmd
+      run: |
+        @echo off
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
+
+    # 前回実行時刻を取得
+    - name: 前回実行時刻の取得
+      id: last-execution
+      shell: cmd
+      run: |
+        @echo off
+        set PROJECT_ROOT=${{ github.workspace }}
+        set LAST_TIME_FILE=%PROJECT_ROOT%\.github\last-review-time
+
+        if exist "%LAST_TIME_FILE%" (
+          set /p LAST_TIME=<"%LAST_TIME_FILE%"
+          echo last_time=%LAST_TIME% >> %GITHUB_OUTPUT%
+          echo has_last_time=true >> %GITHUB_OUTPUT%
+          echo 前回実行時刻: %LAST_TIME%
+        ) else (
+          echo has_last_time=false >> %GITHUB_OUTPUT%
+          echo 前回実行時刻が見つかりません（初回実行）
+        )
+
+    # 現在の実行時刻を記録
+    - name: 現在の実行時刻を記録
+      shell: cmd
+      run: |
+        @echo off
+        set PROJECT_ROOT=${{ github.workspace }}
+
+        REM 現在時刻をISO形式で取得
+        for /f "tokens=1-6 delims=/:. " %%a in ('%SystemRoot%\System32\wbem\wmic.exe OS Get localdatetime ^| find "."') do (
+          set CURRENT_TIME=%%a-%%b-%%cT%%d:%%e:%%fZ
+        )
+
+        REM .githubディレクトリが存在することを確認
+        if not exist "%PROJECT_ROOT%\.github" mkdir "%PROJECT_ROOT%\.github"
+
+        echo %CURRENT_TIME% > "%PROJECT_ROOT%\.github\last-review-time"
+        echo 実行時刻を記録: %CURRENT_TIME%
+
+    # 新しいコミットとPRを取得
+    - name: 変更内容の取得
+      if: steps.last-execution.outputs.has_last_time == 'true'
+      id: changes
+      shell: cmd
+      run: |
+        @echo off
+        setlocal enabledelayedexpansion
+        set PROJECT_ROOT=${{ github.workspace }}
+        set LAST_TIME=${{ steps.last-execution.outputs.last_time }}
+        set TEMP_COMMITS=%PROJECT_ROOT%\temp_commits.txt
+        set TEMP_PRS=%PROJECT_ROOT%\temp_prs.txt
+
+        echo 前回実行以降の変更を取得中...
+        echo 基準時刻: %LAST_TIME%
+
+        REM mainブランチの新しいコミットを取得
+        git log main --since="%LAST_TIME%" --oneline --no-merges > "%TEMP_COMMITS%" 2>nul
+
+        REM コミット数をカウント
+        set COMMIT_COUNT=0
+        for /f %%a in ('type "%TEMP_COMMITS%" ^| find /c /v ""') do set COMMIT_COUNT=%%a
+        echo 新しいコミット数: %COMMIT_COUNT%
+
+        REM PRリストを取得（JSON形式）
+        gh pr list --state all --limit 20 --json number,title,state,updatedAt > "%TEMP_PRS%" 2>nul
+
+        REM Node.jsでPRリストをフィルタリング・整形
+        node -e "const fs = require('fs'); const data = JSON.parse(fs.readFileSync('%TEMP_PRS%', 'utf8')); const lastTime = new Date('%LAST_TIME%'); const filtered = data.filter(pr => new Date(pr.updatedAt) > lastTime); if(filtered.length > 0) { console.log(filtered.map(pr => 'PR #' + pr.number + ': ' + pr.title + ' [' + pr.state + ']').join('\n')); } else { console.log('なし'); }" > "%TEMP_PRS%.filtered" 2>nul
+
+        REM 出力を設定
+        echo has_changes=true >> %GITHUB_OUTPUT%
+
+        REM クリーンアップは後のステップで行う
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # サマリーを準備
+    - name: サマリーの準備
+      if: steps.last-execution.outputs.has_last_time == 'true' && steps.changes.outputs.has_changes == 'true'
+      id: prepare-summary
+      shell: cmd
+      run: |
+        @echo off
+        setlocal enabledelayedexpansion
+        set PROJECT_ROOT=${{ github.workspace }}
+        set TEMP_COMMITS=%PROJECT_ROOT%\temp_commits.txt
+        set TEMP_PRS=%PROJECT_ROOT%\temp_prs.txt.filtered
+        set SUMMARY_FILE=%PROJECT_ROOT%\temp_summary.txt
+
+        REM サマリーファイルを作成
+        (
+          echo === 日次実装レビュー ===
+          echo.
+          echo 【新しいコミット】
+        ) > "%SUMMARY_FILE%"
+
+        if exist "%TEMP_COMMITS%" (
+          for /f %%a in ('type "%TEMP_COMMITS%" ^| find /c /v ""') do set COUNT=%%a
+          if !COUNT! GTR 0 (
+            type "%TEMP_COMMITS%" >> "%SUMMARY_FILE%"
+          ) else (
+            echo なし >> "%SUMMARY_FILE%"
+          )
+        ) else (
+          echo なし >> "%SUMMARY_FILE%"
+        )
+
+        (
+          echo.
+          echo 【更新されたPR】
+        ) >> "%SUMMARY_FILE%"
+
+        if exist "%TEMP_PRS%" (
+          type "%TEMP_PRS%" >> "%SUMMARY_FILE%"
+        ) else (
+          echo なし >> "%SUMMARY_FILE%"
+        )
+
+        echo has_summary=true >> %GITHUB_OUTPUT%
+        echo サマリー準備完了
+
+    # Slack通知
+    - name: Slack通知
+      if: steps.prepare-summary.outputs.has_summary == 'true'
+      continue-on-error: true
+      shell: cmd
+      run: |
+        @echo off
+        set PROJECT_ROOT=${{ github.workspace }}
+        set SUMMARY_FILE=%PROJECT_ROOT%\temp_summary.txt
+
+        REM Slack Bot Tokenが設定されているか確認
+        if "%SLACK_BOT_TOKEN%"=="" (
+          echo Slack Bot Tokenが設定されていません。通知をスキップします。
+          exit /b 0
+        )
+
+        REM サマリーファイルが存在するか確認
+        if not exist "%SUMMARY_FILE%" (
+          echo サマリーファイルが見つかりません。通知をスキップします。
+          exit /b 0
+        )
+
+        REM Slack通知を送信
+        node "%PROJECT_ROOT%\script\slack-notify.js" daily-review "%SUMMARY_FILE%"
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+
+    # 一時ファイルのクリーンアップ
+    - name: 一時ファイルのクリーンアップ
+      if: always()
+      shell: cmd
+      run: |
+        @echo off
+        set PROJECT_ROOT=${{ github.workspace }}
+
+        if exist "%PROJECT_ROOT%\temp_commits.txt" del "%PROJECT_ROOT%\temp_commits.txt"
+        if exist "%PROJECT_ROOT%\temp_prs.txt" del "%PROJECT_ROOT%\temp_prs.txt"
+        if exist "%PROJECT_ROOT%\temp_prs.txt.filtered" del "%PROJECT_ROOT%\temp_prs.txt.filtered"
+        if exist "%PROJECT_ROOT%\temp_summary.txt" del "%PROJECT_ROOT%\temp_summary.txt"
+
+        echo 一時ファイルをクリーンアップしました
+
+    # 初回実行時のメッセージ
+    - name: 初回実行通知
+      if: steps.last-execution.outputs.has_last_time == 'false'
+      shell: cmd
+      run: |
+        @echo off
+        echo 初回実行のため、実行時刻のみ記録しました。
+        echo 次回実行時から変更内容のサマリーが生成されます。
