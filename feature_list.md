@@ -111,3 +111,11 @@ BoxSelectionTest: ボックスガチャの抽選テスト
 QuantizeTest: クォンタイズのタイミングテスト
 [[BoxSelectionTest]]
 [[QuantizeTest]]
+
+## Melpomene(未検証)
+GitHub Issues連携デバッグツール（エディタ専用）。
+シーン上のオブジェクトに紐づけたバグ報告や改善要望を管理する。
+Alt+Ctrl+クリックでチケット作成、SceneViewにチケットをオーバーレイ表示。
+Slack/Discord通知機能あり。
+[[Melpomene]]
+[[MelpomeneNotification]]

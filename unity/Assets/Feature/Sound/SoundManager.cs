@@ -183,6 +183,22 @@ public class SoundManager : MonoBehaviour
     }
 
     /// <summary>
+    /// SEを再生（簡易版）
+    /// </summary>
+    public int PlaySE(string soundKey, float volume = 1.0f)
+    {
+        return RequestPlay(System.Guid.NewGuid().ToString(), soundKey, volume, false);
+    }
+
+    /// <summary>
+    /// Voiceを再生（簡易版）
+    /// </summary>
+    public int PlayVoice(string soundKey, float volume = 1.0f)
+    {
+        return RequestPlay(System.Guid.NewGuid().ToString(), soundKey, volume, false);
+    }
+
+    /// <summary>
     /// 再生リクエスト
     /// </summary>
     public int RequestPlay(string playerId, string soundKey, float volume = 1.0f, bool loop = false)
